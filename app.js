@@ -1,0 +1,72 @@
+'use strict';
+const $=s=>document.querySelector(s), all=s=>[...document.querySelectorAll(s)];
+const reasons=['Pizzas','Autres spécialités italiennes','Ambiance et cadre','Histoire du restaurant','Emplacement','Habitude','Invitation d’un proche','Autre'];
+const ratings=['Très satisfait','Satisfait','Mitigé','Insatisfait','Non concerné'];
+const questions=[['first','Première visite ?',['Oui','Non']],['source','Comment nous avez-vous connus ?',['Bouche-à-oreille','En passant','Google ou Maps','Réseaux sociaux','Autre']],['reasons','Pourquoi être venu aujourd’hui ?',reasons,true],['primary_reason','Votre raison principale ?',reasons],['food','La cuisine',ratings],['service_rating','L’accueil et le service',ratings],['atmosphere','L’ambiance',ratings],['value','Le rapport qualité-prix',ratings],['return_intent','Envie de revenir ?',['Oui','Peut-être','Non']],['improvement','Une amélioration en priorité ?',['Cuisine','Service','Attente','Ambiance ou bruit','Prix','Rien en particulier','Autre']]];
+let cfg=JSON.parse(localStorage.getItem('rc-config')||'null')||window.RETOUR_CONFIG,session=JSON.parse(sessionStorage.getItem('rc-session')||'null'),rows=[],pendingId=crypto.randomUUID();
+const live=()=>!!(cfg.url&&cfg.key),notice=t=>$('#status').textContent=t,esc=t=>String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const establishments = {
+  cordeliers: 'Chez Carlo Cordeliers',
+  gerland: 'Chez Carlo Gerland',
+};
+const establishmentOptions = Object.entries(establishments)
+  .map(([id, label]) => `<option value="${id}">${label}</option>`).join('');
+$('#survey').insertAdjacentHTML('afterbegin',
+  `<div class="card"><label>Établissement <select name="establishment" required>
+    <option value="">Choisir un établissement</option>${establishmentOptions}
+  </select></label></div>`);
+$('.filters').insertAdjacentHTML('beforeend',
+  `<label>Établissement <select id="filterEstablishment">
+    <option value="">Tous les établissements</option>${establishmentOptions}
+    <option value="unassigned">Non renseigné</option>
+  </select></label>`);
+const establishmentSelect = $('#survey').elements.establishment;
+function establishmentLabel(id) {
+  return establishments[id] || 'Non renseigné';
+}
+$('#questions').innerHTML=questions.map(([id,title,opts,multi],n)=>`<fieldset class="card" id="q-${id}"><legend>${n+1}. ${title}</legend>${multi?'<small>Plusieurs réponses possibles</small>':''}<div class="choices">${opts.map(v=>`<label class="choice"><input type="${multi?'checkbox':'radio'}" name="${id}" value="${esc(v)}" ${multi?'':'required'}>${esc(v)}</label>`).join('')}</div></fieldset>`).join('');
+function sync(){const first=$('#survey').elements.first.value;$('#q-source').hidden=first!=='Oui';all('[name=source]').forEach(e=>{e.required=first==='Oui';if(first!=='Oui')e.checked=false});const selected=all('[name=reasons]:checked').map(e=>e.value);all('[name=primary_reason]').forEach(e=>{e.closest('label').hidden=!selected.includes(e.value);if(!selected.includes(e.value))e.checked=false});if(selected.length===1)all('[name=primary_reason]').find(e=>e.value===selected[0]).checked=true;}
+$('#survey').addEventListener('change',sync);
+function reset(){ const establishment = establishmentSelect.value; $('#survey').reset(); establishmentSelect.value = establishment;const hour=Number(new Intl.DateTimeFormat('fr-FR',{timeZone:'Europe/Paris',hour:'2-digit',hourCycle:'h23'}).format(new Date()));$('#survey').elements.service.value=hour<17?'Midi':'Soir';pendingId=crypto.randomUUID();sync();}
+async function api(path,options={}){if(!session)throw Error('Connectez-vous dans Connexion pour accéder à Supabase.');if(session.expires_at*1000<Date.now()+30000){const r=await fetch(cfg.url+'/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{apikey:cfg.key,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:session.refresh_token})});if(!r.ok)throw Error('Session expirée. Reconnectez-vous.');session=await r.json();sessionStorage.setItem('rc-session',JSON.stringify(session));}const r=await fetch(cfg.url+path,{...options,headers:{apikey:cfg.key,Authorization:'Bearer '+session.access_token,'Content-Type':'application/json',...options.headers}});if(!r.ok){const e=await r.json().catch(()=>({}));throw Error(e.message||'Erreur de connexion : '+r.status)}const text=await r.text();return text?JSON.parse(text):null;}
+async function save(data){if(live())await api('/rest/v1/rc_responses?on_conflict=id',{method:'POST',headers:{Prefer:'resolution=ignore-duplicates,return=minimal'},body:JSON.stringify(data)});else{const local=JSON.parse(localStorage.getItem('rc-demo')||'[]');if(!local.some(r=>r.id===data.id))local.push({...data,created_at:new Date().toISOString()});localStorage.setItem('rc-demo',JSON.stringify(local));}}
+let busy=false;async function submit(refused){if(busy)return;busy=true;all('#survey button').forEach(b=>b.disabled=true);try{const form=new FormData($('#survey')),data={id:pendingId,outcome:refused?'refusal':'response',service:form.get('service'),establishment:form.get('establishment')};if(!Object.hasOwn(establishments,data.establishment)){establishmentSelect.focus();throw Error('Choisissez un établissement.');}if(!refused){if(!form.getAll('reasons').length)throw Error('Sélectionnez au moins un motif de visite.');for(const [key] of questions)data[key]=key==='reasons'?form.getAll(key):form.get(key)||null;data.comment=form.get('comment').trim();}await save(data);reset();notice(live()?'Réponse enregistrée dans Supabase. Client suivant.':'Essai enregistré sur ce téléphone uniquement.');window.scrollTo({top:0,behavior:'smooth'});}catch(e){notice('Non enregistré : '+e.message+' Vos réponses sont conservées à l’écran.');}finally{busy=false;all('#survey button').forEach(b=>b.disabled=false);}}
+$('#survey').onsubmit=e=>{e.preventDefault();submit(false)};$('#refusal').onclick=()=>submit(true);
+all('[data-tab]').forEach(b=>b.onclick=()=>{for(const id of ['collecte','dashboard','settings'])$('#'+id).hidden=id!==b.dataset.tab;all('[data-tab]').forEach(x=>x.setAttribute('aria-selected',x===b));if(b.dataset.tab==='dashboard')load();});
+function day(d){return new Intl.DateTimeFormat('fr-CA',{timeZone:'Europe/Paris',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(d));}
+function filtered(){const site=$('#filterEstablishment').value;return rows.filter(r=>(!site||(r.establishment||'unassigned')===site)&&(!$('#from').value||day(r.created_at)>=$('#from').value)&&(!$('#to').value||day(r.created_at)<=$('#to').value)&&(!$('#filterService').value||r.service===$('#filterService').value));}
+const pieColors=['#a81414','#d18b36','#427562','#526b9d','#b36a86','#8064a0','#7e8172','#c65731'];
+function pieSlices(counts){
+ const total=counts.reduce((a,b)=>a+b,0);if(!total)return '';
+ let angle=-Math.PI/2;
+ return counts.map((n,i)=>{if(!n)return '';const next=angle+2*Math.PI*n/total;let shape;
+ if(n===total)shape=`<circle cx="100" cy="100" r="90" fill="${pieColors[i%pieColors.length]}"/>`;
+ else{const x1=100+90*Math.cos(angle),y1=100+90*Math.sin(angle),x2=100+90*Math.cos(next),y2=100+90*Math.sin(next);shape=`<path d="M 100 100 L ${x1} ${y1} A 90 90 0 ${n/total>.5?1:0} 1 ${x2} ${y2} Z" fill="${pieColors[i%pieColors.length]}" stroke="#fffdf8" stroke-width="1.5"/>`;}
+ angle=next;return shape;
+ }).join('');
+}
+function render(){
+ const f=filtered(),a=f.filter(r=>r.outcome==='response'),pct=(n,d)=>d?Math.round(100*n/d)+' %':'—';
+ $('#metrics').innerHTML=[['Retours recueillis',a.length],['Envie de revenir',pct(a.filter(r=>r.return_intent==='Oui').length,a.length)],['Refus de répondre',pct(f.length-a.length,f.length)]].map(([t,v])=>`<div class="card metric">${t}<strong>${v}</strong></div>`).join('');
+ const order=['primary_reason','first','source','return_intent','food','service_rating','atmosphere','value','improvement','reasons'];
+ const headings={primary_reason:'La raison principale de leur visite',first:'Nouveaux clients ou habitués ?',source:'Comment nous découvrent-ils ?',return_intent:'Ont-ils envie de revenir ?',food:'Satisfaction · Cuisine',service_rating:'Satisfaction · Accueil et service',atmosphere:'Satisfaction · Ambiance',value:'Satisfaction · Rapport qualité-prix',improvement:'Leur priorité d’amélioration',reasons:'Tous les motifs de visite'};
+ $('#breakdowns').innerHTML=a.length?'<div class="charts-grid">'+order.map((key,index)=>{
+ const q=questions.find(q=>q[0]===key),opts=q[2],eligible=a.filter(r=>r[key]!=null&&(key!=='source'||r.first==='Oui')),den=eligible.length;
+ const counts=opts.map(v=>eligible.filter(r=>Array.isArray(r[key])?r[key].includes(v):r[key]===v).length),total=counts.reduce((x,y)=>x+y,0),multi=key==='reasons';
+ const base=multi?`${total} choix cités par ${den} tables · parts calculées sur les choix`:`${den} table${den>1?'s':''}${key==='source'?' · premières visites uniquement':''}`;
+ const description=opts.map((v,i)=>`${v} : ${counts[i]}, ${pct(counts[i],total)}`).join(' ; ');
+ return `<article class="card chart-card"><div class="chart-heading"><span class="chart-number">${String(index+1).padStart(2,'0')}</span><h3>${esc(headings[key])}</h3></div><small class="chart-base">${base}</small>${total?`<div class="pie-layout"><svg class="pie" viewBox="0 0 200 200" role="img" aria-labelledby="pie-title-${key} pie-desc-${key}"><title id="pie-title-${key}">${esc(headings[key])}</title><desc id="pie-desc-${key}">${esc(description)}</desc>${pieSlices(counts)}</svg><ul class="pie-legend">${opts.map((v,i)=>`<li><span class="legend-dot" style="background:${pieColors[i%pieColors.length]}"></span><span class="legend-label">${esc(v)}</span><span class="legend-value">${pct(counts[i],total)}<small>${counts[i]} ${multi?'choix':counts[i]>1?'tables':'table'}</small></span></li>`).join('')}</ul></div>`:'<p class="empty-chart">Aucune réponse pour ce critère sur la période.</p>'}${multi?'<p class="chart-note">Un client peut citer plusieurs motifs. Pour identifier le déclencheur principal, consultez le premier graphique.</p>':''}</article>`;
+ }).join('')+'</div>':'<div class="card empty-chart"><h3>Les premiers retours arrivent bientôt.</h3><p>Les camemberts apparaîtront dès qu’un questionnaire aura été enregistré sur la période sélectionnée.</p></div>';
+ const comments=a.filter(r=>r.comment?.trim()).slice(0,20);
+ if(comments.length)$('#breakdowns').insertAdjacentHTML('beforeend','<div class="card comments-card"><h3>La parole aux clients</h3><small>Les 20 dernières remarques de la période</small>'+comments.map(r=>'<blockquote><p>'+esc(r.comment)+'</p><small>'+esc(day(r.created_at))+' · '+esc(r.service)+' · '+esc(establishmentLabel(r.establishment))+'</small></blockquote>').join('')+'</div>');
+}
+async function load(){try{if(live()){rows=[];for(let offset=0;;offset+=1000){const chunk=await api('/rest/v1/rc_responses?select=*&order=created_at.desc,id.desc&limit=1000&offset='+offset);rows.push(...chunk);if(chunk.length<1000)break;}}else rows=JSON.parse(localStorage.getItem('rc-demo')||'[]').map(r=>({...r,created_at:r.created_at||new Date().toISOString()}));render();}catch(e){rows=[];$('#metrics').textContent='';$('#breakdowns').textContent='Résultats indisponibles.';notice(e.message);}}
+$('#refresh').onclick=load;all('.filters input,.filters select').forEach(x=>x.onchange=render);
+$('#export').onclick=()=>{const keys=['id','created_at','outcome','service','establishment',...questions.map(x=>x[0]),'comment'];const quote=v=>'"'+String(Array.isArray(v)?v.join(' | '):v??'').replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const csv='\ufeff'+[keys,...filtered().map(r=>keys.map(k=>k==='establishment'?establishmentLabel(r[k]):r[k]))].map(row=>row.map(quote).join(';')).join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='retour-client.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('#config').elements.url.value=cfg.url;$('#config').elements.key.value=cfg.key;
+$('#config').onsubmit=e=>{e.preventDefault();const f=new FormData(e.target),url=f.get('url').trim().replace(/\/$/,'');if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(url)){notice('Utilisez l’URL HTTPS de votre projet Supabase.');return}cfg={url,key:f.get('key').trim()};localStorage.setItem('rc-config',JSON.stringify(cfg));session=null;sessionStorage.removeItem('rc-session');location.reload();};
+$('#login').onsubmit=async e=>{e.preventDefault();try{if(!live())throw Error('Configurez d’abord votre projet Supabase.');const f=new FormData(e.target),r=await fetch(cfg.url+'/auth/v1/token?grant_type=password',{method:'POST',headers:{apikey:cfg.key,'Content-Type':'application/json'},body:JSON.stringify({email:f.get('email'),password:f.get('password')})});if(!r.ok)throw Error('Connexion refusée. Vérifiez vos identifiants.');session=await r.json();sessionStorage.setItem('rc-session',JSON.stringify(session));e.target.reset();notice('Connecté. Vous pouvez collecter les retours.');}catch(e){notice(e.message);}};
+$('#logout').onclick=async()=>{if(session&&live())try{await api('/auth/v1/logout',{method:'POST'})}catch{}session=null;sessionStorage.removeItem('rc-session');rows=[];$('#metrics').textContent='';$('#breakdowns').textContent='';notice('Déconnecté.');};
+$('#mode').textContent=live()?'Projet Supabase configuré.':'Mode essai local.';notice(live()?'Supabase configuré · connexion équipe requise.':'MODE ESSAI · données locales uniquement · connexion Supabase à configurer.');reset();$('[data-tab=collecte]').setAttribute('aria-selected','true');
+
+
